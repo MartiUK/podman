@@ -2,6 +2,20 @@
 
 # Changelog
 
+## v1.32.3 (2024-03-20)
+
+    CVE-2024-1753 container escape fix
+    [release-1.32] Bump google.golang.org/protobuf to v1.33.0
+    Fix for CVE-2023-39325
+
+## v1.32.2 (2023-10-30)
+
+    Mask /sys/devices/virtual/powercap by default
+
+## v1.32.1 (2023-10-23)
+
+    chroot.setupChrootBindMounts: pay more attention to flags
+
 ## v1.32.0 (2023-09-14)
 
     GetTmpDir is not using ImageCopyTmpdir correctly
