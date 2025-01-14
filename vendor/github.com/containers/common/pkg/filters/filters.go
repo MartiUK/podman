@@ -2,6 +2,7 @@ package filters
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 func ComputeUntilTimestamp(filterValues []string) (time.Time, error) {
 	invalid := time.Time{}
 	if len(filterValues) != 1 {
-		return invalid, fmt.Errorf("specify exactly one timestamp for until")
+		return invalid, errors.New("specify exactly one timestamp for until")
 	}
 	ts, err := timetype.GetTimestamp(filterValues[0], time.Now())
 	if err != nil {
@@ -76,13 +77,10 @@ func FiltersFromRequest(r *http.Request) ([]string, error) {
 
 	libpodFilters := make([]string, 0, len(filters))
 	for filterKey, filterSlice := range filters {
-		f := filterKey
 		for _, filterValue := range filterSlice {
-			f += "=" + filterValue
+			libpodFilters = append(libpodFilters, fmt.Sprintf("%s=%s", filterKey, filterValue))
 		}
-		libpodFilters = append(libpodFilters, f)
 	}
-
 	return libpodFilters, nil
 }
 
@@ -107,13 +105,7 @@ func PrepareFilters(r *http.Request) (map[string][]string, error) {
 func MatchLabelFilters(filterValues []string, labels map[string]string) bool {
 outer:
 	for _, filterValue := range filterValues {
-		filterArray := strings.SplitN(filterValue, "=", 2)
-		filterKey := filterArray[0]
-		if len(filterArray) > 1 {
-			filterValue = filterArray[1]
-		} else {
-			filterValue = ""
-		}
+		filterKey, filterValue := splitFilterValue(filterValue)
 		for labelKey, labelValue := range labels {
 			if filterValue == "" || labelValue == filterValue {
 				if labelKey == filterKey || matchPattern(filterKey, labelKey) {
@@ -124,6 +116,32 @@ outer:
 		return false
 	}
 	return true
+}
+
+// MatchNegatedLabelFilters matches negated labels and returns true if they are valid
+func MatchNegatedLabelFilters(filterValues []string, labels map[string]string) bool {
+	for _, filterValue := range filterValues {
+		filterKey, filterValue := splitFilterValue(filterValue)
+		for labelKey, labelValue := range labels {
+			if filterValue == "" || labelValue == filterValue {
+				if labelKey == filterKey || matchPattern(filterKey, labelKey) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func splitFilterValue(filterValue string) (string, string) {
+	filterArray := strings.SplitN(filterValue, "=", 2)
+	filterKey := filterArray[0]
+	if len(filterArray) > 1 {
+		filterValue = filterArray[1]
+	} else {
+		filterValue = ""
+	}
+	return filterKey, filterValue
 }
 
 func matchPattern(pattern string, value string) bool {

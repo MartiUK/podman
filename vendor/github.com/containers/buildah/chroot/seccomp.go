@@ -1,5 +1,4 @@
 //go:build linux && seccomp
-// +build linux,seccomp
 
 package chroot
 
@@ -12,6 +11,8 @@ import (
 	libseccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/sirupsen/logrus"
 )
+
+const seccompAvailable = true
 
 // setSeccomp sets the seccomp filter for ourselves and any processes that we'll start.
 func setSeccomp(spec *specs.Spec) error {

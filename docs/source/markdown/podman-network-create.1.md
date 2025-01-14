@@ -15,9 +15,6 @@ If no options are provided, Podman assigns a free subnet and name for the networ
 
 Upon completion of creating the network, Podman displays the name of the newly added network.
 
-NOTE: The support for the network name "pasta" is deprecated and will be removed in the next major
-release because it is used as a special network mode in **podman run/create --network**.
-
 ## OPTIONS
 #### **--disable-dns**
 
@@ -42,6 +39,9 @@ under the `[network]` section.
 
 The name of the plugin can then be used as driver to create a network for your plugin.
 The list of all supported drivers and plugins can be seen with `podman info --format {{.Plugins.Network}}`.
+
+Note that the `macvlan` and `ipvlan` drivers do not support port forwarding. Support for port forwarding
+with a plugin depends on the implementation of the plugin.
 
 #### **--gateway**=*ip*
 
@@ -70,6 +70,14 @@ Because it bypasses the host network stack no additional restrictions can be set
 privileged container is run it can set a default route themselves. If this is a concern then the
 container connections should be blocked on your actual network gateway.
 
+Using the `bridge` driver with this option has the following effects:
+ - Global IP forwarding sysctls will not be changed in the host network namespace.
+ - IP forwarding is disabled on the bridge interface instead of setting up a firewall.
+ - No default route will be added to the container.
+
+In all cases, aardvark-dns will only resolve container names with this option enabled.
+Other queries will be answered with `NXDOMAIN`.
+
 #### **--ip-range**=*range*
 
 Allocate container IP from a range. The range must be a either a complete subnet in CIDR notation or be in
@@ -84,7 +92,9 @@ ipam driver automatically based on the network driver.
 
 Valid values are:
 
- - `dhcp`: IP addresses are assigned from a dhcp server on the network. This driver is not yet supported with netavark. For CNI the *dhcp* plugin needs to be activated before.
+ - `dhcp`: IP addresses are assigned from a dhcp server on the network. When using the netavark backend
+  the `netavark-dhcp-proxy.socket` must be enabled in order to start the dhcp-proxy when a container is
+  started, for CNI use the `cni-dhcp.socket` unit instead.
  - `host-local`: IP addresses are assigned locally.
  - `none`: No ip addresses are assigned to the interfaces.
 
@@ -115,6 +125,10 @@ Additionally the `bridge` driver supports the following options:
 - `isolate`: This option isolates networks by blocking traffic between those that have this option enabled.
 - `com.docker.network.bridge.name`: This option assigns the given name to the created Linux Bridge
 - `com.docker.network.driver.mtu`: Sets the Maximum Transmission Unit (MTU) and takes an integer value.
+- `vrf`: This option assigns a VRF to the bridge interface. It accepts the name of the VRF and defaults to none. Can only be used with the Netavark network backend.
+- `mode`: This option sets the specified bridge mode on the interface. Defaults to `managed`. Supported values:
+  - `managed`: Podman creates and deletes the bridge and changes sysctls of it. It adds firewall rules to masquerade outgoing traffic, as well as setup port forwarding for incoming traffic using DNAT.
+  - `unmanaged`: Podman uses an existing bridge. It must exist by the time you want to start a container which uses the network. There will be no NAT or port forwarding, even if such options were passed while creating the container.
 
 The `macvlan` and `ipvlan` driver support the following options:
 
@@ -157,7 +171,7 @@ $ podman network create --subnet 2001:db8::/64 --ipv6 newnetv6
 newnetv6
 ```
 
-Create a network named *newnet* that uses *192.168.33.0/24* and defines a gateway as *192.168.133.3*.
+Create a network named *newnet* that uses *192.168.33.0/24* and defines a gateway as *192.168.33.3*.
 ```
 $ podman network create --subnet 192.168.33.0/24 --gateway 192.168.33.3 newnet
 newnet

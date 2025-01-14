@@ -1,13 +1,15 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
-	"github.com/containers/common/pkg/util"
-	"github.com/containers/podman/v4/libpod/define"
+	"github.com/containers/podman/v5/libpod/define"
 )
 
 // Contains the public Runtime API for pods
@@ -143,7 +145,7 @@ func (r *Runtime) GetRunningPods() ([]*Pod, error) {
 	}
 	// Assemble running pods
 	for _, c := range containers {
-		if !util.StringInSlice(c.PodID(), pods) {
+		if !slices.Contains(pods, c.PodID()) {
 			pods = append(pods, c.PodID())
 			pod, err := r.GetPod(c.PodID())
 			if err != nil {

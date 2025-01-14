@@ -100,7 +100,7 @@ function _check_env {
 }
 
 
-@test "podman run --env-file" {
+@test "podman run/exec --env-file" {
     declare -A expect=(
         [simple]="abc"
         [special]="bcd#e!f|g hij=lmnop"
@@ -116,7 +116,7 @@ function _check_env {
 
     # Write two files, so we confirm that podman can accept multiple values
     # and that the second will override the first
-    local envfile1="$PODMAN_TMPDIR/envfile-in-1"
+    local envfile1="$PODMAN_TMPDIR/envfile-in-1,withcomma"
     local envfile2="$PODMAN_TMPDIR/envfile-in-2"
     cat >$envfile1 <<EOF
 infile2=this is set in env-file-1 and should be overridden in env-file-2
@@ -146,7 +146,7 @@ EOF
     echo "-----------------"
     cat -vET $envfile2
 
-    # See above for resoning behind 'env -0' and a results file
+    # See above for reasoning behind 'env -0' and a results file
     local resultsfile="$PODMAN_TMPDIR/envresults"
     touch $resultsfile
     run_podman run --rm -v "$resultsfile:/envresults:Z" \
@@ -154,20 +154,23 @@ EOF
                --env-file $envfile2                     \
                $IMAGE sh -c 'env -0 >/envresults'
 
-    # FIXME FIXME FIXME #19565, exceptions
-    #
-    # FIXME FIXME FIXME #19565, octothorpe not handled in envariable values
-    # FIXME FIXME FIXME:        this should be fixed, and the line below removed
-    expect[special]="bcd"
-
-    # FIXME FIXME FIXME #19565, what should multi-line strings be?
-    # FIXME FIXME FIXME:        For docker compat, this should be >>>"line1<<<
-    expect[withnl]=$'line1\nline2'
-
-    # FIXME FIXME FIXME uncomment this once octothorpe parsing is fixed
-    #expect[weird*na#me!]=$weirdname
+    expect[withnl]=$'"line1'
+    expect[weird*na#me!]=$weirdname
 
     _check_env $resultsfile
+
+    # Now check the same with podman exec
+    run_podman run -d --name testctr        \
+            -v "$resultsfile:/envresults:Z" \
+            $IMAGE top
+
+    run_podman exec --env-file $envfile1 \
+            --env-file $envfile2 testctr \
+            sh -c 'env -0 >/envresults'
+
+    _check_env $resultsfile
+
+    run_podman rm -f -t0 testctr
 }
 
 # Obscure feature: '--env FOO*' will pass all env starting with FOO
@@ -206,7 +209,7 @@ EOF
     fi
 
     # Same, with --env-file
-    local envfile="$PODMAN_TMPDIR/envfile-in-1"
+    local envfile="$PODMAN_TMPDIR/envfile-in-1,withcomma"
     cat >$envfile <<EOF
 $prefix*
 NOT*DEFINED
@@ -221,6 +224,42 @@ EOF
     # up and looking at the run_podman command, so I choose to leave as-is.
     _check_env $resultsfile
 }
+
+
+@test "podman create --label-file" {
+    declare -A expect=(
+        [simple]="abc"
+        [special]="bcd#e!f|g hij=lmnop"
+        [withquotes]='"withquotes"'
+        [withsinglequotes]="'withsingle'"
+    )
+
+    # Write two files, so we confirm that podman can accept multiple values
+    # and that the second will override the first
+    local labelfile1="$PODMAN_TMPDIR/label-file1,withcomma"
+    local labelfile2="$PODMAN_TMPDIR/label-file2"
+
+        cat >$labelfile1 <<EOF
+simple=value1
+
+# Comments ignored
+EOF
+
+    for v in "${!expect[@]}"; do
+        echo "$v=${expect[$v]}" >>$labelfile2
+    done
+
+    run_podman create --rm --name testctr --label-file $labelfile1  \
+               --label-file $labelfile2 $IMAGE
+
+    for v in "${!expect[@]}"; do
+        run_podman inspect testctr --format "{{index .Config.Labels \"$v\"}}"
+        assert "$output" == "${expect[$v]}" "label $v"
+    done
+
+    run_podman rm testctr
+}
+
 
 
 # vim: filetype=sh

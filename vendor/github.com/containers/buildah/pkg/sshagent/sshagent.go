@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containers/buildah/internal/tmpdir"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -63,7 +64,6 @@ func newAgentServerSocket(socketPath string) (*AgentServer, error) {
 		conn:     &conn,
 		shutdown: make(chan bool, 1),
 	}, nil
-
 }
 
 // Serve starts the SSH agent on the host and returns the path of the socket where the agent is serving
@@ -79,7 +79,7 @@ func (a *AgentServer) Serve(processLabel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	serveDir, err := os.MkdirTemp("", ".buildah-ssh-sock")
+	serveDir, err := os.MkdirTemp(tmpdir.GetTempDir(), ".buildah-ssh-sock")
 	if err != nil {
 		return "", err
 	}
@@ -103,7 +103,7 @@ func (a *AgentServer) Serve(processLabel string) (string, error) {
 
 	go func() {
 		for {
-			//listener.Accept blocks
+			// listener.Accept blocks
 			c, err := listener.Accept()
 			if err != nil {
 				select {

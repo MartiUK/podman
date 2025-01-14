@@ -1,5 +1,4 @@
 //go:build !remote
-// +build !remote
 
 package generate
 
@@ -11,27 +10,32 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
-	"github.com/containers/podman/v4/libpod/define"
-	"github.com/containers/podman/v4/pkg/rootless"
-	"github.com/containers/podman/v4/pkg/util"
+	"github.com/containers/common/pkg/config"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/rootless"
+	"github.com/containers/podman/v5/pkg/util"
+	"github.com/containers/storage/pkg/fileutils"
+
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 // DevicesFromPath computes a list of devices
 func DevicesFromPath(g *generate.Generator, devicePath string) error {
 	if isCDIDevice(devicePath) {
-		registry := cdi.GetRegistry(
+		registry, err := cdi.NewCache(
 			cdi.WithAutoRefresh(false),
 		)
+		if err != nil {
+			return fmt.Errorf("creating CDI registry: %w", err)
+		}
 		if err := registry.Refresh(); err != nil {
 			logrus.Debugf("The following error was triggered when refreshing the CDI registry: %v", err)
 		}
-		_, err := registry.InjectDevices(g.Config, devicePath)
-		if err != nil {
+		if _, err := registry.InjectDevices(g.Config, devicePath); err != nil {
 			return fmt.Errorf("setting up CDI devices: %w", err)
 		}
 		return nil
@@ -92,34 +96,14 @@ func DevicesFromPath(g *generate.Generator, devicePath string) error {
 }
 
 func BlockAccessToKernelFilesystems(privileged, pidModeIsHost bool, mask, unmask []string, g *generate.Generator) {
-	defaultMaskPaths := []string{"/proc/acpi",
-		"/proc/kcore",
-		"/proc/keys",
-		"/proc/latency_stats",
-		"/proc/timer_list",
-		"/proc/timer_stats",
-		"/proc/sched_debug",
-		"/proc/scsi",
-		"/sys/firmware",
-		"/sys/fs/selinux",
-		"/sys/dev/block",
-	}
-
 	if !privileged {
-		for _, mp := range defaultMaskPaths {
+		for _, mp := range config.DefaultMaskedPaths {
 			// check that the path to mask is not in the list of paths to unmask
 			if shouldMask(mp, unmask) {
 				g.AddLinuxMaskedPaths(mp)
 			}
 		}
-		for _, rp := range []string{
-			"/proc/asound",
-			"/proc/bus",
-			"/proc/fs",
-			"/proc/irq",
-			"/proc/sys",
-			"/proc/sysrq-trigger",
-		} {
+		for _, rp := range config.DefaultReadOnlyPaths {
 			if shouldMask(rp, unmask) {
 				g.AddLinuxReadonlyPaths(rp)
 			}
@@ -150,7 +134,7 @@ func addDevice(g *generate.Generator, device string) error {
 		return fmt.Errorf("%s is not a valid device: %w", src, err)
 	}
 	if rootless.IsRootless() {
-		if _, err := os.Stat(src); err != nil {
+		if err := fileutils.Exists(src); err != nil {
 			return err
 		}
 		perm := "ro"
@@ -192,7 +176,7 @@ func shouldMask(mask string, unmask []string) bool {
 		for _, m1 := range strings.Split(m, ":") {
 			match, err := filepath.Match(m1, mask)
 			if err != nil {
-				logrus.Errorf(err.Error())
+				logrus.Error(err.Error())
 			}
 			if match {
 				return false

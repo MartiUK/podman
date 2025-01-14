@@ -1,6 +1,3 @@
-//go:build amd64 || arm64
-// +build amd64 arm64
-
 package main
 
 import (
@@ -15,10 +12,8 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v4/cmd/podman/registry"
-	"github.com/containers/podman/v4/pkg/machine"
-	"github.com/containers/podman/v4/pkg/machine/provider"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -80,25 +75,24 @@ func composeProvider() (string, error) {
 		return value, nil
 	}
 
-	candidates := registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeProviders
+	candidates := registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeProviders.Get()
 	if len(candidates) == 0 {
 		return "", errors.New("no compose provider specified, please refer to `man podman-compose` for details")
 	}
 
+	lookupErrors := make([]error, 0, len(candidates))
 	for _, candidate := range candidates {
 		path, err := exec.LookPath(os.ExpandEnv(candidate))
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return "", err
+		if err == nil {
+			// First specified provider "candidate" wins.
+			logrus.Debugf("Found compose provider %q", path)
+			return path, nil
 		}
-		// First specified provider "candidate" wins.
-		logrus.Debugf("Found compose provider %q", path)
-		return path, nil
+		logrus.Debugf("Error looking up compose provider %q: %v", candidate, err)
+		lookupErrors = append(lookupErrors, err)
 	}
 
-	return "", errors.New("no configured compose provider found on system, please refer to the documentation for details")
+	return "", fmt.Errorf("looking up compose provider failed\n%v", errorhandling.JoinErrors(lookupErrors))
 }
 
 // composeDockerHost returns the value to be set in the DOCKER_HOST environment
@@ -114,15 +108,8 @@ func composeDockerHost() (string, error) {
 		return registry.DefaultAPIAddress(), nil
 	}
 
-	cfg, err := config.ReadCustomConfig()
-	if err != nil {
-		return "", err
-	}
-
-	// NOTE: podman --connection=foo and --url=... are injected
-	// into the default connection below in `root.go`.
-	defaultConnection := cfg.Engine.ActiveService
-	if defaultConnection == "" {
+	conf := registry.PodmanConfig()
+	if conf.URI == "" {
 		switch runtime.GOOS {
 		// If no default connection is set on Linux or FreeBSD,
 		// we just use the local socket by default - just as
@@ -137,63 +124,27 @@ func composeDockerHost() (string, error) {
 		}
 	}
 
-	connection, ok := cfg.Engine.ServiceDestinations[defaultConnection]
-	if !ok {
-		return "", fmt.Errorf("internal error: default connection %q not found in database", defaultConnection)
-	}
-	parsedConnection, err := url.Parse(connection.URI)
+	parsedConnection, err := url.Parse(conf.URI)
 	if err != nil {
 		return "", fmt.Errorf("preparing connection to remote machine: %w", err)
 	}
 
 	// If the default connection does not point to a `podman
 	// machine`, we cannot use a local path and need to use SSH.
-	if !connection.IsMachine {
-		// Compose doesn't like paths, so we optimistically
+	if !conf.MachineMode {
+		// Docker Compose v1 doesn't like paths for ssh, so we optimistically
 		// assume the presence of a Docker socket on the remote
 		// machine which is the case for podman machines.
-		return strings.TrimSuffix(connection.URI, parsedConnection.Path), nil
+		if parsedConnection.Scheme == "ssh" {
+			return strings.TrimSuffix(conf.URI, parsedConnection.Path), nil
+		}
+		return conf.URI, nil
 	}
-
-	machineProvider, err := provider.Get()
+	uri, err := getMachineConn(conf.URI, parsedConnection)
 	if err != nil {
-		return "", fmt.Errorf("getting machine provider: %w", err)
+		return "", fmt.Errorf("get machine connection URI: %w", err)
 	}
-	machineList, err := machineProvider.List(machine.ListOptions{})
-	if err != nil {
-		return "", fmt.Errorf("listing machines: %w", err)
-	}
-
-	// Now we know that the connection points to a machine and we
-	// can find the machine by looking for the one with the
-	// matching port.
-	connectionPort, err := strconv.Atoi(parsedConnection.Port())
-	if err != nil {
-		return "", fmt.Errorf("parsing connection port: %w", err)
-	}
-	for _, item := range machineList {
-		if connectionPort != item.Port {
-			continue
-		}
-
-		vm, err := machineProvider.LoadVMByName(item.Name)
-		if err != nil {
-			return "", fmt.Errorf("loading machine: %w", err)
-		}
-		info, err := vm.Inspect()
-		if err != nil {
-			return "", fmt.Errorf("inspecting machine: %w", err)
-		}
-		if info.ConnectionInfo.PodmanSocket == nil {
-			return "", errors.New("socket of machine is not set")
-		}
-		if info.State != machine.Running {
-			return "", fmt.Errorf("machine %s is not running but in state %s", item.Name, info.State)
-		}
-		return "unix://" + info.ConnectionInfo.PodmanSocket.Path, nil
-	}
-
-	return "", fmt.Errorf("could not find a matching machine for connection %q", connection.URI)
+	return uri, nil
 }
 
 // composeEnv returns the compose-specific environment variables.
@@ -217,6 +168,18 @@ func composeEnv() ([]string, error) {
 		//        working with podman-compose _by default_.
 		"DOCKER_CONFIG=" + os.Getenv("DOCKER_CONFIG"),
 	}, nil
+}
+
+// composeShouldLogWarning returns whether a notice on engine redirection should be piped to stderr regardless of logging configuration
+func composeShouldLogWarning() (bool, error) {
+	if shouldWarnLogsEnv, ok := os.LookupEnv("PODMAN_COMPOSE_WARNING_LOGS"); ok {
+		if shouldWarnLogsEnvVal, err := strconv.ParseBool(shouldWarnLogsEnv); err == nil {
+			return shouldWarnLogsEnvVal, nil
+		} else if shouldWarnLogsEnv != "" {
+			return true, fmt.Errorf("PODMAN_COMPOSE_WARNING_LOGS should be a boolean: %w", err)
+		}
+	}
+	return registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs, nil
 }
 
 // underline uses ANSI codes to underline the specified string.
@@ -251,7 +214,7 @@ func composeProviderExec(args []string, stdout io.Writer, stderr io.Writer, warn
 	logrus.Debugf("Executing compose provider (%s %s) with additional env %s", provider, strings.Join(args, " "), strings.Join(env, " "))
 
 	if warn {
-		fmt.Fprint(os.Stderr, underline(fmt.Sprintf(">>>> Executing external compose provider %q. Please refer to the documentation for details. <<<<\n\n", provider)))
+		fmt.Fprint(os.Stderr, underline(fmt.Sprintf(">>>> Executing external compose provider %q. Please see podman-compose(1) for how to disable this message. <<<<\n\n", provider)))
 	}
 
 	if err := cmd.Run(); err != nil {
@@ -278,7 +241,11 @@ func composeHelp(cmd *cobra.Command) error {
 		return err
 	}
 
-	return composeProviderExec([]string{"--help"}, nil, nil, registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs)
+	shouldLog, err := composeShouldLogWarning()
+	if err != nil {
+		return err
+	}
+	return composeProviderExec([]string{"--help"}, nil, nil, shouldLog)
 }
 
 // composeMain is the main function of the compose command.
@@ -298,5 +265,9 @@ func composeMain(cmd *cobra.Command, args []string) error {
 		return composeHelp(cmd)
 	}
 
-	return composeProviderExec(args, nil, nil, registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs)
+	shouldLog, err := composeShouldLogWarning()
+	if err != nil {
+		return err
+	}
+	return composeProviderExec(args, nil, nil, shouldLog)
 }
